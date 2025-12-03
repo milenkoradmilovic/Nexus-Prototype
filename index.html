@@ -1,1 +1,330 @@
-H1 Hello Nexus
+from flask import Flask, request, redirect, url_for, render_template_string
+from datetime import datetime, timedelta
+import itertools
+
+app = Flask(__name__)
+
+# In-memory "database"
+_lead_id_counter = itertools.count(1)
+leads = {}  # id -> lead dict
+
+sequence_templates = [
+    {
+        "id": "default_5_touch",
+        "name": "Default 5-touch outbound",
+        "steps": [
+            {"day_offset": 0, "channel": "Email", "subject": "Quick question about your strategy"},
+            {"day_offset": 2, "channel": "LinkedIn", "subject": "Sent a quick note your way"},
+            {"day_offset": 4, "channel": "Phone", "subject": "Call to connect"},
+            {"day_offset": 7, "channel": "Email", "subject": "Following up here"},
+            {"day_offset": 10, "channel": "Email", "subject": "Last touch for now"},
+        ],
+    },
+    {
+        "id": "lite_3_touch",
+        "name": "Lite 3-touch for execs",
+        "steps": [
+            {"day_offset": 0, "channel": "Email", "subject": "Brief idea for you"},
+            {"day_offset": 3, "channel": "Email", "subject": "Circling back on this"},
+            {"day_offset": 7, "channel": "Phone", "subject": "Respectful final touch"},
+        ],
+    },
+]
+
+BASE_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+    <title>Project Nexus</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    >
+</head>
+<body class="bg-light">
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+  <div class="container-fluid">
+    <a class="navbar-brand" href="{{ url_for('index') }}">Project Nexus</a>
+  </div>
+</nav>
+
+<div class="container mb-5">
+  {% block content %}{% endblock %}
+</div>
+</body>
+</html>
+"""
+
+INDEX_TEMPLATE = """
+{% extends "base" %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h2 class="mb-0">Leads</h2>
+  <a href="{{ url_for('new_lead') }}" class="btn btn-primary">+ New lead</a>
+</div>
+
+{% if not leads %}
+  <div class="alert alert-info">
+    No leads yet. Click "New lead" to add your first one.
+  </div>
+{% else %}
+  <table class="table table-striped align-middle">
+    <thead>
+      <tr>
+        <th>Lead</th>
+        <th>Company</th>
+        <th>Title</th>
+        <th>Email</th>
+        <th>Sequence</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for lead in leads %}
+      <tr>
+        <td>{{ lead.name }}</td>
+        <td>{{ lead.company }}</td>
+        <td>{{ lead.title }}</td>
+        <td>{{ lead.email }}</td>
+        <td>
+          {% if lead.sequence_template_id %}
+            {{ lead.sequence_name }}
+          {% else %}
+            <span class="text-muted">None</span>
+          {% endif %}
+        </td>
+        <td class="text-end">
+          <a href="{{ url_for('view_lead', lead_id=lead.id) }}" class="btn btn-sm btn-outline-secondary">View</a>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% endif %}
+{% endblock %}
+"""
+
+NEW_LEAD_TEMPLATE = """
+{% extends "base" %}
+{% block content %}
+<h2>New lead</h2>
+<form method="post" class="mt-3">
+  <div class="row g-3">
+    <div class="col-md-6">
+      <label class="form-label">Full name</label>
+      <input type="text" class="form-control" name="name" required />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Title</label>
+      <input type="text" class="form-control" name="title" placeholder="VP of IT, CIO, etc." />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Company</label>
+      <input type="text" class="form-control" name="company" />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Email</label>
+      <input type="email" class="form-control" name="email" required />
+    </div>
+    <div class="col-md-6">
+      <label class="form-label">Sequence template</label>
+      <select class="form-select" name="sequence_template_id">
+        <option value="">No sequence yet</option>
+        {% for seq in sequences %}
+          <option value="{{ seq.id }}">{{ seq.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+  </div>
+  <div class="mt-4 d-flex gap-2">
+    <a href="{{ url_for('index') }}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-primary">Create lead</button>
+  </div>
+</form>
+{% endblock %}
+"""
+
+VIEW_LEAD_TEMPLATE = """
+{% extends "base" %}
+{% block content %}
+<a href="{{ url_for('index') }}" class="btn btn-link p-0 mb-3">&larr; Back to leads</a>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <h3 class="card-title mb-1">{{ lead.name }}</h3>
+    <h6 class="card-subtitle mb-2 text-muted">
+      {{ lead.title or "No title" }} at {{ lead.company or "No company" }}
+    </h6>
+    <p class="mb-0"><strong>Email:</strong> {{ lead.email }}</p>
+  </div>
+</div>
+
+{% if lead.sequence_template_id %}
+  <h4 class="mb-3">Outbound sequence</h4>
+  <p class="text-muted">
+    Template: {{ lead.sequence_name }}  
+    <br />
+    Start date: {{ start_date.strftime("%Y-%m-%d") }}
+  </p>
+  <table class="table table-bordered align-middle">
+    <thead class="table-light">
+      <tr>
+        <th>Step</th>
+        <th>Day</th>
+        <th>Date</th>
+        <th>Channel</th>
+        <th>Subject or action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for idx, step in sequence_steps %}
+        <tr>
+          <td>#{{ idx }}</td>
+          <td>Day {{ step.day_offset }}</td>
+          <td>{{ (start_date + timedelta(days=step.day_offset)).strftime("%Y-%m-%d") }}</td>
+          <td>{{ step.channel }}</td>
+          <td>{{ step.subject }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="alert alert-warning">
+    No sequence assigned yet. Edit this lead in a future version to attach one.
+  </div>
+{% endif %}
+
+{% endblock %}
+"""
+
+# Simple template loader using render_template_string
+TEMPLATES = {
+    "base": BASE_TEMPLATE,
+    "index": INDEX_TEMPLATE,
+    "new_lead": NEW_LEAD_TEMPLATE,
+    "view_lead": VIEW_LEAD_TEMPLATE,
+}
+
+
+def render(name, **context):
+    # Basic template inheritance using render_template_string with a dict lookup
+    context["sequences"] = [
+        type("SeqObj", (), s) for s in sequence_templates
+    ]  # to get dot access
+    context.setdefault("url_for", url_for)
+
+    # Wrap all templates for Jinja's extends to work
+    env_templates = {f"{k}.html": v for k, v in TEMPLATES.items()}
+    # Fake a loader by putting base into the context
+    # Easiest is to make "base" available and then extend "base"
+    from jinja2 import Environment, DictLoader
+
+    env = Environment(loader=DictLoader(env_templates))
+    tmpl = env.get_template(f"{name}.html")
+    return tmpl.render(context)
+
+
+def get_sequence_by_id(seq_id):
+    for s in sequence_templates:
+        if s["id"] == seq_id:
+            return s
+    return None
+
+
+@app.route("/")
+def index():
+    lead_list = []
+    for lead in leads.values():
+        seq = get_sequence_by_id(lead.get("sequence_template_id")) if lead.get("sequence_template_id") else None
+        lead_list.append(
+            type(
+                "LeadObj",
+                (),
+                {
+                    "id": lead["id"],
+                    "name": lead["name"],
+                    "title": lead["title"],
+                    "company": lead["company"],
+                    "email": lead["email"],
+                    "sequence_template_id": lead.get("sequence_template_id"),
+                    "sequence_name": seq["name"] if seq else None,
+                },
+            )
+        )
+    return render_template_string(render("index", leads=lead_list))
+
+
+@app.route("/leads/new", methods=["GET", "POST"])
+def new_lead():
+    if request.method == "POST":
+        lead_id = next(_lead_id_counter)
+        sequence_template_id = request.form.get("sequence_template_id") or None
+        leads[lead_id] = {
+            "id": lead_id,
+            "name": request.form.get("name", "").strip(),
+            "title": request.form.get("title", "").strip(),
+            "company": request.form.get("company", "").strip(),
+            "email": request.form.get("email", "").strip(),
+            "sequence_template_id": sequence_template_id,
+            "created_at": datetime.utcnow(),
+        }
+        return redirect(url_for("view_lead", lead_id=lead_id))
+
+    return render_template_string(render("new_lead"))
+
+
+@app.route("/leads/<int:lead_id>")
+def view_lead(lead_id):
+    lead = leads.get(lead_id)
+    if not lead:
+        return "Lead not found", 404
+
+    seq = get_sequence_by_id(lead.get("sequence_template_id")) if lead.get("sequence_template_id") else None
+    start_date = lead.get("created_at", datetime.utcnow())
+
+    sequence_steps = []
+    if seq:
+        for idx, step in enumerate(seq["steps"], start=1):
+            sequence_steps.append(
+                (
+                    idx,
+                    type(
+                        "StepObj",
+                        (),
+                        {
+                            "day_offset": step["day_offset"],
+                            "channel": step["channel"],
+                            "subject": step["subject"],
+                        },
+                    ),
+                )
+            )
+
+    lead_obj = type(
+        "LeadObj",
+        (),
+        {
+            "id": lead["id"],
+            "name": lead["name"],
+            "title": lead["title"],
+            "company": lead["company"],
+            "email": lead["email"],
+            "sequence_template_id": lead.get("sequence_template_id"),
+            "sequence_name": seq["name"] if seq else None,
+        },
+    )
+
+    return render_template_string(
+        render(
+            "view_lead",
+            lead=lead_obj,
+            start_date=start_date,
+            sequence_steps=sequence_steps,
+        )
+    )
+
+
+if __name__ == "__main__":
+    app.run(debug=True)
+
